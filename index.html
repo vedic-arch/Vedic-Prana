@@ -8,221 +8,6 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- Load Inter font -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap" rel="stylesheet">
-    <!-- Load Firebase/Firestore Modules -->
-    <script type="module">
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, addDoc, onSnapshot, query, Timestamp, setLogLevel, doc, setDoc, getDocs, where } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-
-        // Firebase Initialization and Authentication Logic
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
-        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
-
-        // Set log level to debug for easier development and debugging
-        setLogLevel('Debug');
-        
-        // Initialize Firebase
-        const app = initializeApp(firebaseConfig);
-        const db = getFirestore(app);
-        const auth = getAuth(app);
-        
-        let userId = null;
-        let isAuthReady = false;
-
-        window.db = db; // Make DB available globally
-        window.auth = auth; // Make Auth available globally
-        
-        // Initial state for mantra and goal
-        let currentMantra = 'Hare Krishna Maha-Mantra';
-        let dailyRoundGoal = 4; // Default goal
-
-        // Function to set up the authentication and start the app
-        async function setupAuthAndApp() {
-            try {
-                if (initialAuthToken) {
-                    await signInWithCustomToken(auth, initialAuthToken);
-                } else {
-                    await signInAnonymously(auth);
-                }
-            } catch (error) {
-                console.error("Firebase Auth Error:", error);
-                await signInAnonymously(auth);
-            }
-
-            onAuthStateChanged(auth, (user) => {
-                if (user) {
-                    userId = user.uid;
-                    isAuthReady = true;
-                    console.log("User authenticated:", userId);
-                    window.startApp(userId);
-                } else {
-                    console.log("User signed out or anonymous sign-in failed.");
-                }
-            });
-        }
-        
-        setupAuthAndApp();
-
-        // --- Goal and Japa Data Store ---
-        let currentDailyRounds = 0;
-        let totalLoggedRounds = 0;
-
-        // 1. Get/Listen to Japa Logs (For daily and lifetime totals)
-        window.setupJapaListener = (callback) => {
-            if (!isAuthReady) return () => {}; 
-            
-            const japaRef = collection(db, `artifacts/${appId}/users/${userId}/japa_logs`);
-            const q = query(japaRef);
-
-            const unsubscribe = onSnapshot(q, (snapshot) => {
-                const today = new Date().toDateString();
-                let currentDayRounds = 0;
-                totalLoggedRounds = 0;
-
-                snapshot.forEach((doc) => {
-                    const data = doc.data();
-                    const logDate = data.timestamp.toDate().toDateString();
-                    
-                    if (logDate === today) {
-                        currentDayRounds += data.rounds;
-                    }
-                    totalLoggedRounds += data.rounds;
-                });
-                
-                currentDailyRounds = currentDayRounds;
-                callback({ dailyRounds: currentDailyRounds, lifetimeRounds: totalLoggedRounds });
-            }, (error) => {
-                console.error("Error listening to japa logs:", error);
-            });
-
-            return unsubscribe;
-        };
-
-        // 2. Get/Listen for Goal AND Mantra settings (Unified)
-        window.setupSettingsListener = (goalCallback, mantraCallback) => {
-            if (!isAuthReady) return () => {};
-            const settingsDocRef = doc(db, `artifacts/${appId}/users/${userId}/settings`, 'japa_settings'); // Unified settings doc
-            const initialGoal = 4;
-
-            const unsubscribe = onSnapshot(settingsDocRef, (docSnap) => {
-                if (docSnap.exists()) {
-                    const data = docSnap.data();
-                    
-                    // 1. Handle Goal
-                    dailyRoundGoal = data.goal || initialGoal;
-                    if (goalCallback) goalCallback(dailyRoundGoal);
-                    
-                    // 2. Handle Mantra
-                    currentMantra = data.mantra || 'Hare Krishna Maha-Mantra';
-                    if (mantraCallback) mantraCallback(currentMantra);
-
-                } else {
-                    // Set default if non-existent
-                    setDoc(settingsDocRef, { goal: initialGoal, mantra: currentMantra, timestamp: Timestamp.now() }, { merge: true });
-                    if (goalCallback) goalCallback(initialGoal);
-                    if (mantraCallback) mantraCallback(currentMantra);
-                }
-            }, (error) => {
-                console.error("Error listening to settings:", error);
-            });
-            return unsubscribe;
-        };
-        
-        // 3. Set Goal (Refactored to use unified settings doc)
-        window.setDailyGoal = async (newGoal) => {
-            if (!isAuthReady) return;
-            const settingsDocRef = doc(db, `artifacts/${appId}/users/${userId}/settings`, 'japa_settings');
-            try {
-                await setDoc(settingsDocRef, { goal: newGoal, timestamp: Timestamp.now() }, { merge: true });
-                showMessage(`Daily goal updated to ${newGoal} rounds!`, true);
-            } catch (error) {
-                console.error("Error setting goal:", error);
-                showMessage('Failed to set goal.', false);
-            }
-        };
-
-        // 4. Function to set the current mantra
-        window.setMantra = async (newMantra) => {
-            if (!isAuthReady) return;
-            const settingsDocRef = doc(db, `artifacts/${appId}/users/${userId}/settings`, 'japa_settings');
-            try {
-                // Ensure the mantra is a string and not null/undefined
-                const mantraToSave = (newMantra || 'Hare Krishna Maha-Mantra').trim();
-                await setDoc(settingsDocRef, { mantra: mantraToSave, timestamp: Timestamp.now() }, { merge: true });
-                showMessage(`Mantra updated successfully!`, true);
-            } catch (error) {
-                console.error("Error setting mantra:", error);
-                showMessage('Failed to set mantra.', false);
-            }
-        };
-
-        // 5. Functions for Custom Mantra List Management
-        window.saveCustomMantraToList = async (mantraText) => {
-            if (!isAuthReady || !mantraText.trim()) return;
-            const customMantraRef = collection(db, `artifacts/${appId}/users/${userId}/custom_mantras`);
-
-            try {
-                // Check if the mantra text already exists in the custom list
-                const q = query(customMantraRef, where("text", "==", mantraText.trim()));
-                const querySnapshot = await getDocs(q);
-
-                if (querySnapshot.empty) {
-                    await addDoc(customMantraRef, {
-                        text: mantraText.trim(),
-                        timestamp: Timestamp.now()
-                    });
-                    return true;
-                }
-                return false; // Already exists
-            } catch (error) {
-                console.error("Error saving custom mantra to list:", error);
-                return false;
-            }
-        };
-
-        window.getCustomMantras = async () => {
-            if (!isAuthReady) return [];
-            const customMantraRef = collection(db, `artifacts/${appId}/users/${userId}/custom_mantras`);
-            try {
-                const snapshot = await getDocs(customMantraRef);
-                return snapshot.docs.map(doc => ({
-                    id: doc.id,
-                    name: 'Custom Mantra', 
-                    text: doc.data().text,
-                    is_custom: true,
-                    border: 'border-purple-500' // Distinct color for custom mantras
-                }));
-            } catch (error) {
-                console.error("Error fetching custom mantras:", error);
-                return [];
-            }
-        };
-
-
-        // 6. Save Japa Round (Called by JapaMala.completeRound())
-        window.saveJapaRound = async (rounds, finalCount) => {
-            if (!isAuthReady) {
-                console.error("Auth not ready. Cannot save japa round.");
-                return { success: false, message: "Authentication not ready." };
-            }
-
-            const japaRef = collection(db, `artifacts/${appId}/users/${userId}/japa_logs`);
-            
-            try {
-                await addDoc(japaRef, {
-                    rounds: rounds,
-                    final_count: finalCount,
-                    timestamp: Timestamp.now(),
-                    date_string: new Date().toDateString() // Helper for faster local filtering/checking
-                });
-                return { success: true, message: `Completed 1 round (${finalCount} beads) and logged to cloud!` };
-            } catch (error) {
-                console.error("Error saving japa log:", error);
-                return { success: false, message: "Error saving japa log." };
-            }
-        };
-    </script>
     <style>
         /* Global Styles */
         :root {
@@ -524,7 +309,7 @@
                     </button>
                 </div>
                 <!-- Mantra Display -->
-                <p id="current-mantra-display" class="text-2xl font-semibold italic text-white leading-relaxed whitespace-pre-wrap">Loading...</p>
+                <p id="current-mantra-display" class="text-2xl font-semibold italic text-white leading-relaxed whitespace-pre-wrap">Hare Krishna Maha-Mantra</p>
                 <p class="text-sm text-gray-500 mt-1">Tap the card or press Space/Enter</p>
             </div>
             
@@ -583,22 +368,21 @@
                     <p class="text-sm font-semibold text-gray-400">Tradition: <span class="text-[--primary-action-color]">Vaishnava (Vishnu/Krishna)</span></p>
                     <p class="text-sm text-gray-300 mt-2">Significance: This "Great Mantra" is considered the most effective means of self-realization in the current age, awakening pure consciousness and love for the Supreme Being.</p>
                 </div>
-                <!-- ... other mantras ... -->
-                 <div class="bg-gray-800 p-5 rounded-xl shadow-lg border-l-4 border-[--primary-action-color] border-gray-700">
+                <div class="bg-gray-800 p-5 rounded-xl shadow-lg border-l-4 border-[--primary-action-color] border-gray-700">
                     <h3 class="text-xl font-bold text-amber-300 mb-2">Om Namo Bhagavate Vasudevaya</h3>
                     <p class="text-sm italic text-gray-300 mb-3">I bow to the Lord Vasudeva (Krishna, the son of Vasudeva).</p>
                     <hr class="border-gray-700 my-3">
                     <p class="text-sm font-semibold text-gray-400">Tradition: <span class="text-[--primary-action-color]">Vaishnava (Vishnu/Krishna)</span></p>
                     <p class="text-sm text-gray-300 mt-2">Significance: A powerful mantra of surrender and liberation, known as the Dwadashakshari Mantra (twelve-syllable mantra). It grants peace and freedom from the cycle of birth and death.</p>
                 </div>
-                 <div class="bg-gray-800 p-5 rounded-xl shadow-lg border-l-4 border-violet-500 border-gray-700">
+                <div class="bg-gray-800 p-5 rounded-xl shadow-lg border-l-4 border-violet-500 border-gray-700">
                     <h3 class="text-xl font-bold text-violet-300 mb-2">Om Namah Shivaya</h3>
                     <p class="text-sm italic text-gray-300 mb-3">I bow to Shiva.</p>
                     <hr class="border-gray-700 my-3">
                     <p class="text-sm font-semibold text-gray-400">Tradition: <span class="text-violet-500">Shaiva (Shiva)</span></p>
                     <p class="text-sm text-gray-300 mt-2">Significance: The Panchakshara (five-syllable) mantra. It cleanses impurities, invokes inner peace, and brings one closer to the ultimate reality embodied by Lord Shiva.</p>
                 </div>
-                 <div class="bg-gray-800 p-5 rounded-xl shadow-lg border-l-4 border-violet-500 border-gray-700">
+                <div class="bg-gray-800 p-5 rounded-xl shadow-lg border-l-4 border-violet-500 border-gray-700">
                     <h3 class="text-xl font-bold text-violet-300 mb-2">Maha Mrityunjaya Mantra</h3>
                     <p class="text-sm italic text-gray-300 mb-3">Om Tryambakam Yajamahe Sugandhim Pushti Vardhanam Urvarukamiva Bandhanan Mrityor Mukshiya Maamritat.</p>
                     <hr class="border-gray-700 my-3">
@@ -633,7 +417,7 @@
                 </div>
                 <!-- Tab 1: List -->
                 <div id="tab-preset" class="space-y-3 max-h-60 overflow-y-auto pr-2">
-                    <p class="text-center text-gray-500">Loading mantras...</p>
+                    <!-- Will be populated by JavaScript -->
                 </div>
                 <!-- Tab 2: Input -->
                 <div id="tab-custom" class="hidden">
@@ -670,7 +454,90 @@
     </nav>
 
     <script>
-        // --- Global Utility Functions ---
+        // ===================================
+        // LOCAL STORAGE DATA MANAGER
+        // ===================================
+        const DataStore = {
+            // Get all japa logs
+            getJapaLogs() {
+                const logs = localStorage.getItem('vedic_japa_logs');
+                return logs ? JSON.parse(logs) : [];
+            },
+            
+            // Save a new japa round
+            saveJapaLog(rounds, finalCount) {
+                const logs = this.getJapaLogs();
+                logs.push({
+                    rounds: rounds,
+                    final_count: finalCount,
+                    timestamp: new Date().toISOString(),
+                    date_string: new Date().toDateString()
+                });
+                localStorage.setItem('vedic_japa_logs', JSON.stringify(logs));
+                return { success: true, message: `Completed 1 round (${finalCount} beads) and logged!` };
+            },
+            
+            // Get daily and lifetime round counts
+            getJapaCounts() {
+                const logs = this.getJapaLogs();
+                const today = new Date().toDateString();
+                let dailyRounds = 0;
+                let lifetimeRounds = 0;
+                
+                logs.forEach(log => {
+                    if (log.date_string === today) {
+                        dailyRounds += log.rounds;
+                    }
+                    lifetimeRounds += log.rounds;
+                });
+                
+                return { dailyRounds, lifetimeRounds };
+            },
+            
+            // Get/Set daily goal
+            getDailyGoal() {
+                const goal = localStorage.getItem('vedic_daily_goal');
+                return goal ? parseInt(goal) : 4;
+            },
+            
+            setDailyGoal(goal) {
+                localStorage.setItem('vedic_daily_goal', goal.toString());
+            },
+            
+            // Get/Set current mantra
+            getCurrentMantra() {
+                const mantra = localStorage.getItem('vedic_current_mantra');
+                return mantra || 'Hare Krishna Maha-Mantra';
+            },
+            
+            setCurrentMantra(mantra) {
+                localStorage.setItem('vedic_current_mantra', mantra);
+            },
+            
+            // Get/Set custom mantras list
+            getCustomMantras() {
+                const mantras = localStorage.getItem('vedic_custom_mantras');
+                return mantras ? JSON.parse(mantras) : [];
+            },
+            
+            addCustomMantra(mantraText) {
+                const mantras = this.getCustomMantras();
+                // Check if already exists
+                if (mantras.find(m => m.text.trim() === mantraText.trim())) {
+                    return false;
+                }
+                mantras.push({
+                    text: mantraText.trim(),
+                    timestamp: new Date().toISOString()
+                });
+                localStorage.setItem('vedic_custom_mantras', JSON.stringify(mantras));
+                return true;
+            }
+        };
+
+        // ===================================
+        // GLOBAL UTILITY FUNCTIONS
+        // ===================================
         function showMessage(message, isSuccess = true) {
             const box = document.getElementById('message-box');
             box.textContent = message;
@@ -681,10 +548,13 @@
             }, 3000);
         }
 
-        // --- View Management ---
+        // ===================================
+        // VIEW MANAGEMENT
+        // ===================================
         let currentView = 'home';
 
         function switchView(viewName) {
+            // Stop breathing if leaving home view
             if (currentView === 'home' && isBreathing) {
                 stopBreathing();
             }
@@ -702,6 +572,7 @@
                 currentView = viewName;
             }
 
+            // Update navigation buttons
             const navButtons = document.querySelectorAll('.nav-button');
             navButtons.forEach(button => {
                 const isActive = button.dataset.view === viewName;
@@ -719,7 +590,9 @@
             });
         });
 
-        // --- Breathing Logic ---
+        // ===================================
+        // BREATHING LOGIC
+        // ===================================
         const breathingCircle = document.getElementById('breathing-circle');
         const breathingText = document.getElementById('breathing-text');
         const toggleBreathingButton = document.getElementById('toggle-breathing');
@@ -827,15 +700,16 @@
                 startBreathing();
             }
         });
-        
-        // --- Japa Mala Class ---
+
+        // ===================================
+        // JAPA MALA CLASS
+        // ===================================
         class JapaMala {
-            constructor(totalDataCallback) {
+            constructor() {
                 this.count = 0;
                 this.rounds = 0;
                 this.soundOn = true;
                 this.audioContext = null;
-                this.totalDataCallback = totalDataCallback;
                 
                 this.loadState();
                 this.initAudio();
@@ -846,24 +720,26 @@
 
             loadState() {
                 try {
-                    if (typeof(Storage) === "undefined" || !window.localStorage) return;
-                    const saved = window.localStorage.getItem('japa_mala_state_v2'); 
+                    const saved = localStorage.getItem('japa_mala_state_v2'); 
                     if (saved) {
                         const state = JSON.parse(saved);
                         this.count = Math.max(0, Math.min(108, state.count || 0));
                         this.soundOn = state.soundOn !== false;
                     }
-                } catch (e) { console.error(e); }
+                } catch (e) { 
+                    console.error('Error loading state:', e); 
+                }
             }
 
             saveState() {
                 try {
-                    if (typeof(Storage) === "undefined" || !window.localStorage) return;
-                    window.localStorage.setItem('japa_mala_state_v2', JSON.stringify({
+                    localStorage.setItem('japa_mala_state_v2', JSON.stringify({
                         count: this.count,
                         soundOn: this.soundOn
                     }));
-                } catch (e) { console.error(e); }
+                } catch (e) { 
+                    console.error('Error saving state:', e); 
+                }
             }
 
             async initAudio() {
@@ -875,26 +751,40 @@
                 if (this.audioContext) return;
                 try {
                     this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
-                    if (this.audioContext.state === 'suspended') await this.audioContext.resume();
-                } catch (e) { console.error(e); }
+                    if (this.audioContext.state === 'suspended') {
+                        await this.audioContext.resume();
+                    }
+                } catch (e) { 
+                    console.error('Error initializing audio:', e); 
+                }
             }
 
             playTone(frequency, duration, type = 'sine', volume = 0.5) {
                 if (!this.soundOn || !this.audioContext) return;
-                const oscillator = this.audioContext.createOscillator();
-                const gainNode = this.audioContext.createGain();
-                oscillator.type = type;
-                oscillator.frequency.setValueAtTime(frequency, this.audioContext.currentTime);
-                gainNode.gain.setValueAtTime(volume, this.audioContext.currentTime);
-                gainNode.gain.exponentialRampToValueAtTime(0.001, this.audioContext.currentTime + duration);
-                oscillator.connect(gainNode);
-                gainNode.connect(this.audioContext.destination);
-                oscillator.start();
-                oscillator.stop(this.audioContext.currentTime + duration);
+                try {
+                    const oscillator = this.audioContext.createOscillator();
+                    const gainNode = this.audioContext.createGain();
+                    oscillator.type = type;
+                    oscillator.frequency.setValueAtTime(frequency, this.audioContext.currentTime);
+                    gainNode.gain.setValueAtTime(volume, this.audioContext.currentTime);
+                    gainNode.gain.exponentialRampToValueAtTime(0.001, this.audioContext.currentTime + duration);
+                    oscillator.connect(gainNode);
+                    gainNode.connect(this.audioContext.destination);
+                    oscillator.start();
+                    oscillator.stop(this.audioContext.currentTime + duration);
+                } catch (e) {
+                    console.error('Error playing tone:', e);
+                }
             }
 
-            playTapSound() { this.playTone(350 + this.count * 2, 0.05, 'square', 0.2); }
-            playBellSound() { this.playTone(880, 0.5, 'sine', 0.7); this.playTone(1320, 0.5, 'sine', 0.4); }
+            playTapSound() { 
+                this.playTone(350 + this.count * 2, 0.05, 'square', 0.2); 
+            }
+            
+            playBellSound() { 
+                this.playTone(880, 0.5, 'sine', 0.7); 
+                this.playTone(1320, 0.5, 'sine', 0.4); 
+            }
 
             hapticFeedback(type) {
                 if (navigator.vibrate) {
@@ -907,7 +797,10 @@
                 const japaCard = document.getElementById('japa-card-counter');
                 japaCard.addEventListener('click', () => this.tapBead());
                 japaCard.addEventListener('keydown', (e) => {
-                    if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); this.tapBead(); }
+                    if (e.key === ' ' || e.key === 'Enter') { 
+                        e.preventDefault(); 
+                        this.tapBead(); 
+                    }
                 });
                 document.getElementById('undoBtn').addEventListener('click', () => this.undoBead());
                 document.getElementById('resetBtn').addEventListener('click', () => this.resetCount());
@@ -915,18 +808,21 @@
                 document.getElementById('muteToggle').addEventListener('click', () => this.toggleMute());
             }
 
-            updateUI() { document.getElementById('count').textContent = `${this.count}`; }
+            updateUI() { 
+                document.getElementById('count').textContent = `${this.count}`; 
+            }
 
             tapBead() {
-                if (this.count >= 108) { this.completeRound(true); return; }
+                if (this.count >= 108) { 
+                    this.completeRound(true); 
+                    return; 
+                }
                 this.count++;
                 this.playTapSound();
                 this.hapticFeedback('tap');
                 if (this.count === 108) {
                     this.playBellSound();
                     this.hapticFeedback('complete');
-                    document.getElementById('japa-card-counter').classList.add('ring-breathe');
-                    setTimeout(() => document.getElementById('japa-card-counter').classList.remove('ring-breathe'), 1000);
                 }
                 this.updateUI();
                 this.saveState();
@@ -949,13 +845,23 @@
             }
 
             async completeRound(logToCloud = true) {
-                if (this.count === 0) { showMessage('The counter is zero. Please count beads first.', false); return; }
-                if (this.count < 108) { this.playBellSound(); this.hapticFeedback('complete'); }
-                this.rounds++;
-                if (logToCloud && window.saveJapaRound) {
-                    const result = await window.saveJapaRound(1, this.count);
-                    showMessage(result.message, result.success);
+                if (this.count === 0) { 
+                    showMessage('The counter is zero. Please count beads first.', false); 
+                    return; 
                 }
+                if (this.count < 108) { 
+                    this.playBellSound(); 
+                    this.hapticFeedback('complete'); 
+                }
+                this.rounds++;
+                
+                // Save to localStorage
+                if (logToCloud) {
+                    const result = DataStore.saveJapaLog(1, this.count);
+                    showMessage(result.message, result.success);
+                    updateJapaUI();
+                }
+                
                 this.count = 0;
                 this.updateUI();
                 this.saveState();
@@ -984,7 +890,9 @@
         
         let japaMalaInstance = null;
 
-        // --- Goal Tracker UI Logic ---
+        // ===================================
+        // GOAL TRACKER UI LOGIC
+        // ===================================
         const dailyGoalDisplay = document.getElementById('dailyRoundGoal');
         const currentRoundsDisplay = document.getElementById('currentDailyRounds');
         const totalLoggedRoundsDisplay = document.getElementById('totalLoggedRounds');
@@ -1019,24 +927,16 @@
             }
         }
 
-        function renderJapaData({ dailyRounds, lifetimeRounds }) {
-            updateGoalProgressUI(dailyRounds, window.dailyRoundGoal);
-            totalLoggedRoundsDisplay.textContent = lifetimeRounds;
+        function updateJapaUI() {
+            const counts = DataStore.getJapaCounts();
+            const goal = DataStore.getDailyGoal();
+            updateGoalProgressUI(counts.dailyRounds, goal);
+            totalLoggedRoundsDisplay.textContent = counts.lifetimeRounds;
         }
 
-        function renderDailyGoal(newGoal) {
-            window.dailyRoundGoal = newGoal;
-            updateGoalProgressUI(Number(currentRoundsDisplay.textContent), newGoal);
-            document.getElementById('newGoalInput').value = newGoal; 
-        }
-
-        function renderCurrentMantra(newMantra) {
-            window.currentMantra = newMantra;
-            document.getElementById('current-mantra-display').textContent = newMantra;
-            document.getElementById('customMantraInput').value = newMantra;
-        }
-
-        // --- Goal Setting Modal Logic ---
+        // ===================================
+        // GOAL SETTING MODAL LOGIC
+        // ===================================
         const goalModal = document.getElementById('goalModal');
         const settingsBtn = document.getElementById('settingsBtn');
         const cancelGoalBtn = document.getElementById('cancelGoalBtn');
@@ -1044,21 +944,29 @@
         const newGoalInput = document.getElementById('newGoalInput');
 
         settingsBtn.addEventListener('click', () => {
-            newGoalInput.value = window.dailyRoundGoal; 
+            newGoalInput.value = DataStore.getDailyGoal();
             goalModal.style.display = 'flex';
         });
 
-        cancelGoalBtn.addEventListener('click', () => { goalModal.style.display = 'none'; });
+        cancelGoalBtn.addEventListener('click', () => { 
+            goalModal.style.display = 'none'; 
+        });
 
         saveGoalBtn.addEventListener('click', () => {
             const newGoal = parseInt(newGoalInput.value);
             if (newGoal > 0) {
-                window.setDailyGoal(newGoal);
+                DataStore.setDailyGoal(newGoal);
+                updateJapaUI();
+                showMessage(`Daily goal updated to ${newGoal} rounds!`, true);
                 goalModal.style.display = 'none';
-            } else { showMessage('Goal must be a number greater than 0.', false); }
+            } else { 
+                showMessage('Goal must be a number greater than 0.', false); 
+            }
         });
         
-        // --- Mantra Selection Modal Logic ---
+        // ===================================
+        // MANTRA SELECTION MODAL LOGIC
+        // ===================================
         const mantraSelectorModal = document.getElementById('mantraSelectorModal');
         const editMantraBtn = document.getElementById('edit-mantra-btn');
         const closeMantraModalBtn = document.getElementById('closeMantraModalBtn');
@@ -1069,41 +977,53 @@
         const customMantraTextarea = document.getElementById('customMantraInput');
 
         const presetMantras = [
-            { name: "Hare Krishna Maha-Mantra", text: "Hare Krishna, Hare Krishna, Krishna Krishna, Hare Hare. Hare Rama, Hare Rama, Rama Rama, Hare Hare.", border: 'border-[--primary-action-color]', is_custom: false },
-            { name: "Om Namo Bhagavate Vasudevaya", text: "Om Namo Bhagavate Vasudevaya", border: 'border-[--primary-action-color]', is_custom: false },
-            { name: "Om Namah Shivaya", text: "Om Namah Shivaya", border: 'border-violet-500', is_custom: false },
-            { name: "Maha Mrityunjaya Mantra", text: "Om Tryambakam Yajamahe Sugandhim Pushti Vardhanam Urvarukamiva Bandhanan Mrityor Mukshiya Maamritat.", border: 'border-violet-500', is_custom: false },
-            { name: "Gayatri Mantra", text: "Om Bhur Bhuvah Svah, Tat Savitur Varenyam, Bhargo Devasya Dheemahi, Dhiyo Yo Nah Prachodayat.", border: 'border-blue-500', is_custom: false },
+            { name: "Hare Krishna Maha-Mantra", text: "Hare Krishna, Hare Krishna, Krishna Krishna, Hare Hare. Hare Rama, Hare Rama, Rama Rama, Hare Hare.", border: 'border-[--primary-action-color]' },
+            { name: "Om Namo Bhagavate Vasudevaya", text: "Om Namo Bhagavate Vasudevaya", border: 'border-[--primary-action-color]' },
+            { name: "Om Namah Shivaya", text: "Om Namah Shivaya", border: 'border-violet-500' },
+            { name: "Maha Mrityunjaya Mantra", text: "Om Tryambakam Yajamahe Sugandhim Pushti Vardhanam Urvarukamiva Bandhanan Mrityor Mukshiya Maamritat.", border: 'border-violet-500' },
+            { name: "Gayatri Mantra", text: "Om Bhur Bhuvah Svah, Tat Savitur Varenyam, Bhargo Devasya Dheemahi, Dhiyo Yo Nah Prachodayat.", border: 'border-blue-500' },
         ];
 
         function selectMantra(mantraText) {
-            window.setMantra(mantraText);
+            DataStore.setCurrentMantra(mantraText);
+            document.getElementById('current-mantra-display').textContent = mantraText;
             mantraSelectorModal.style.display = 'none';
+            showMessage('Mantra updated successfully!', true);
         }
 
-        async function renderPresetMantras() { 
-            presetMantraTab.innerHTML = '<p class="text-center text-gray-500">Loading mantras...</p>';
-            const customMantras = await window.getCustomMantras();
+        function renderPresetMantras() { 
+            const customMantras = DataStore.getCustomMantras();
+            const currentMantra = DataStore.getCurrentMantra();
+            
+            // Filter out custom mantras that duplicate preset mantras
             const presetTexts = new Set(presetMantras.map(m => m.text.trim()));
             const filteredCustomMantras = customMantras.filter(m => !presetTexts.has(m.text.trim()));
-            const allMantras = [...presetMantras, ...filteredCustomMantras];
+            
+            const allMantras = [
+                ...presetMantras, 
+                ...filteredCustomMantras.map(m => ({
+                    name: 'Custom Mantra',
+                    text: m.text,
+                    border: 'border-purple-500',
+                    is_custom: true
+                }))
+            ];
             
             presetMantraTab.innerHTML = ''; 
+            
             if (allMantras.length === 0) {
-                 presetMantraTab.innerHTML = '<p class="text-center text-gray-500">No mantras available. Add a custom one!</p>';
-                 return;
+                presetMantraTab.innerHTML = '<p class="text-center text-gray-500">No mantras available. Add a custom one!</p>';
+                return;
             }
 
             allMantras.forEach(m => {
-                const isSelected = m.text.trim() === window.currentMantra.trim();
-                const name = m.is_custom ? 'Custom Mantra' : m.name;
-                const border = m.is_custom ? 'border-purple-500' : m.border;
+                const isSelected = m.text.trim() === currentMantra.trim();
                 const textColor = isSelected ? 'text-[--primary-action-color]' : (m.is_custom ? 'text-purple-300' : 'text-amber-300');
                 
                 const card = document.createElement('div');
-                card.className = `mantra-card ${isSelected ? 'selected' : ''} border-l-4 ${border}`;
+                card.className = `mantra-card ${isSelected ? 'selected' : ''} border-l-4 ${m.border}`;
                 card.innerHTML = `
-                    <h4 class="text-sm font-bold ${textColor} mb-1">${name}</h4>
+                    <h4 class="text-sm font-bold ${textColor} mb-1">${m.name}</h4>
                     <p class="text-xs italic ${isSelected ? 'text-[--primary-action-color]' : 'text-gray-300'} whitespace-pre-wrap">${m.text}</p>
                 `;
                 card.onclick = () => selectMantra(m.text);
@@ -1126,7 +1046,7 @@
             } else {
                 presetMantraTab.classList.add('hidden');
                 customMantraTab.classList.remove('hidden');
-                customMantraTextarea.value = window.currentMantra; 
+                customMantraTextarea.value = DataStore.getCurrentMantra();
                 customBtn.classList.add('active', 'bg-[--primary-action-color]', 'text-white');
                 customBtn.classList.remove('text-gray-400');
                 presetBtn.classList.remove('active', 'bg-[--primary-action-color]', 'text-white');
@@ -1139,42 +1059,70 @@
             mantraSelectorModal.style.display = 'flex';
         });
 
-        closeMantraModalBtn.addEventListener('click', () => { mantraSelectorModal.style.display = 'none'; });
+        closeMantraModalBtn.addEventListener('click', () => { 
+            mantraSelectorModal.style.display = 'none'; 
+        });
 
         segmentedControl.querySelectorAll('button').forEach(btn => {
-            btn.addEventListener('click', (e) => { switchMantraTab(e.target.dataset.tab); });
+            btn.addEventListener('click', (e) => { 
+                switchMantraTab(e.target.dataset.tab); 
+            });
         });
 
-        saveCustomMantraBtn.addEventListener('click', async () => {
+        saveCustomMantraBtn.addEventListener('click', () => {
             const customText = customMantraTextarea.value.trim();
             if (customText.length > 0) {
-                selectMantra(customText); 
-                await window.saveCustomMantraToList(customText);
-            } else { showMessage('Custom mantra cannot be empty.', false); }
+                DataStore.addCustomMantra(customText);
+                selectMantra(customText);
+            } else { 
+                showMessage('Custom mantra cannot be empty.', false); 
+            }
         });
 
-        // --- App Startup ---
-        window.startApp = (currentUserId) => {
-            updateTechnique(); 
+        // ===================================
+        // APP INITIALIZATION
+        // ===================================
+        function initApp() {
+            console.log('Vedic Ville MVP - Initializing...');
+            
+            // Initialize breathing technique
+            updateTechnique();
+            
+            // Initialize japa counter
+            japaMalaInstance = new JapaMala();
+            
+            // Load and display current mantra
+            document.getElementById('current-mantra-display').textContent = DataStore.getCurrentMantra();
+            
+            // Update japa UI with saved data
+            updateJapaUI();
+            
+            // Start on home view
             switchView('home');
-            if (typeof window.setupJapaListener === 'function') {
-                window.setupJapaListener(renderJapaData);
-                window.setupSettingsListener(renderDailyGoal, renderCurrentMantra); 
-            }
-            japaMalaInstance = new JapaMala(renderJapaData);
-
+            
+            // Global keyboard shortcuts
             document.addEventListener('keydown', (e) => {
-                if (e.target.tagName.toLowerCase() === 'button' || e.target.tagName.toLowerCase() === 'select' || e.target.tagName.toLowerCase() === 'textarea' || e.target.tagName.toLowerCase() === 'input') return;
+                // Don't interfere with input fields
+                if (e.target.tagName.toLowerCase() === 'button' || 
+                    e.target.tagName.toLowerCase() === 'select' || 
+                    e.target.tagName.toLowerCase() === 'textarea' || 
+                    e.target.tagName.toLowerCase() === 'input') return;
+                
                 switch (e.key) {
                     case ' ':
                     case 'Enter':
                         e.preventDefault();
-                        if (currentView === 'japa') japaMalaInstance.tapBead();
-                        else if (currentView === 'home') toggleBreathingButton.click();
+                        if (currentView === 'japa') {
+                            japaMalaInstance.tapBead();
+                        } else if (currentView === 'home') {
+                            toggleBreathingButton.click();
+                        }
                         break;
                     case 'Backspace':
                         e.preventDefault();
-                        if (currentView === 'japa') japaMalaInstance.undoBead();
+                        if (currentView === 'japa') {
+                            japaMalaInstance.undoBead();
+                        }
                         break;
                     case 'r':
                         if ((e.ctrlKey || e.metaKey) && currentView === 'japa') {
@@ -1184,15 +1132,15 @@
                         break;
                 }
             });
-        };
+            
+            console.log('Vedic Ville MVP - Ready!');
+        }
 
-        // Fallback
-        if (typeof window.startApp === 'undefined') {
-             window.startApp = (id) => {
-                updateTechnique();
-                switchView('home');
-                japaMalaInstance = new JapaMala(() => {});
-            };
+        // Start the app when DOM is ready
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', initApp);
+        } else {
+            initApp();
         }
     </script>
 </body>
