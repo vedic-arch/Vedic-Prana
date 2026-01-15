@@ -1,0 +1,1199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vedic Ville: Saffron Edition</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Load Inter font -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap" rel="stylesheet">
+    <!-- Load Firebase/Firestore Modules -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, onSnapshot, query, Timestamp, setLogLevel, doc, setDoc, getDocs, where } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Firebase Initialization and Authentication Logic
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        // Set log level to debug for easier development and debugging
+        setLogLevel('Debug');
+        
+        // Initialize Firebase
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+        
+        let userId = null;
+        let isAuthReady = false;
+
+        window.db = db; // Make DB available globally
+        window.auth = auth; // Make Auth available globally
+        
+        // Initial state for mantra and goal
+        let currentMantra = 'Hare Krishna Maha-Mantra';
+        let dailyRoundGoal = 4; // Default goal
+
+        // Function to set up the authentication and start the app
+        async function setupAuthAndApp() {
+            try {
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (error) {
+                console.error("Firebase Auth Error:", error);
+                await signInAnonymously(auth);
+            }
+
+            onAuthStateChanged(auth, (user) => {
+                if (user) {
+                    userId = user.uid;
+                    isAuthReady = true;
+                    console.log("User authenticated:", userId);
+                    window.startApp(userId);
+                } else {
+                    console.log("User signed out or anonymous sign-in failed.");
+                }
+            });
+        }
+        
+        setupAuthAndApp();
+
+        // --- Goal and Japa Data Store ---
+        let currentDailyRounds = 0;
+        let totalLoggedRounds = 0;
+
+        // 1. Get/Listen to Japa Logs (For daily and lifetime totals)
+        window.setupJapaListener = (callback) => {
+            if (!isAuthReady) return () => {}; 
+            
+            const japaRef = collection(db, `artifacts/${appId}/users/${userId}/japa_logs`);
+            const q = query(japaRef);
+
+            const unsubscribe = onSnapshot(q, (snapshot) => {
+                const today = new Date().toDateString();
+                let currentDayRounds = 0;
+                totalLoggedRounds = 0;
+
+                snapshot.forEach((doc) => {
+                    const data = doc.data();
+                    const logDate = data.timestamp.toDate().toDateString();
+                    
+                    if (logDate === today) {
+                        currentDayRounds += data.rounds;
+                    }
+                    totalLoggedRounds += data.rounds;
+                });
+                
+                currentDailyRounds = currentDayRounds;
+                callback({ dailyRounds: currentDailyRounds, lifetimeRounds: totalLoggedRounds });
+            }, (error) => {
+                console.error("Error listening to japa logs:", error);
+            });
+
+            return unsubscribe;
+        };
+
+        // 2. Get/Listen for Goal AND Mantra settings (Unified)
+        window.setupSettingsListener = (goalCallback, mantraCallback) => {
+            if (!isAuthReady) return () => {};
+            const settingsDocRef = doc(db, `artifacts/${appId}/users/${userId}/settings`, 'japa_settings'); // Unified settings doc
+            const initialGoal = 4;
+
+            const unsubscribe = onSnapshot(settingsDocRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    
+                    // 1. Handle Goal
+                    dailyRoundGoal = data.goal || initialGoal;
+                    if (goalCallback) goalCallback(dailyRoundGoal);
+                    
+                    // 2. Handle Mantra
+                    currentMantra = data.mantra || 'Hare Krishna Maha-Mantra';
+                    if (mantraCallback) mantraCallback(currentMantra);
+
+                } else {
+                    // Set default if non-existent
+                    setDoc(settingsDocRef, { goal: initialGoal, mantra: currentMantra, timestamp: Timestamp.now() }, { merge: true });
+                    if (goalCallback) goalCallback(initialGoal);
+                    if (mantraCallback) mantraCallback(currentMantra);
+                }
+            }, (error) => {
+                console.error("Error listening to settings:", error);
+            });
+            return unsubscribe;
+        };
+        
+        // 3. Set Goal (Refactored to use unified settings doc)
+        window.setDailyGoal = async (newGoal) => {
+            if (!isAuthReady) return;
+            const settingsDocRef = doc(db, `artifacts/${appId}/users/${userId}/settings`, 'japa_settings');
+            try {
+                await setDoc(settingsDocRef, { goal: newGoal, timestamp: Timestamp.now() }, { merge: true });
+                showMessage(`Daily goal updated to ${newGoal} rounds!`, true);
+            } catch (error) {
+                console.error("Error setting goal:", error);
+                showMessage('Failed to set goal.', false);
+            }
+        };
+
+        // 4. Function to set the current mantra
+        window.setMantra = async (newMantra) => {
+            if (!isAuthReady) return;
+            const settingsDocRef = doc(db, `artifacts/${appId}/users/${userId}/settings`, 'japa_settings');
+            try {
+                // Ensure the mantra is a string and not null/undefined
+                const mantraToSave = (newMantra || 'Hare Krishna Maha-Mantra').trim();
+                await setDoc(settingsDocRef, { mantra: mantraToSave, timestamp: Timestamp.now() }, { merge: true });
+                showMessage(`Mantra updated successfully!`, true);
+            } catch (error) {
+                console.error("Error setting mantra:", error);
+                showMessage('Failed to set mantra.', false);
+            }
+        };
+
+        // 5. Functions for Custom Mantra List Management
+        window.saveCustomMantraToList = async (mantraText) => {
+            if (!isAuthReady || !mantraText.trim()) return;
+            const customMantraRef = collection(db, `artifacts/${appId}/users/${userId}/custom_mantras`);
+
+            try {
+                // Check if the mantra text already exists in the custom list
+                const q = query(customMantraRef, where("text", "==", mantraText.trim()));
+                const querySnapshot = await getDocs(q);
+
+                if (querySnapshot.empty) {
+                    await addDoc(customMantraRef, {
+                        text: mantraText.trim(),
+                        timestamp: Timestamp.now()
+                    });
+                    return true;
+                }
+                return false; // Already exists
+            } catch (error) {
+                console.error("Error saving custom mantra to list:", error);
+                return false;
+            }
+        };
+
+        window.getCustomMantras = async () => {
+            if (!isAuthReady) return [];
+            const customMantraRef = collection(db, `artifacts/${appId}/users/${userId}/custom_mantras`);
+            try {
+                const snapshot = await getDocs(customMantraRef);
+                return snapshot.docs.map(doc => ({
+                    id: doc.id,
+                    name: 'Custom Mantra', 
+                    text: doc.data().text,
+                    is_custom: true,
+                    border: 'border-purple-500' // Distinct color for custom mantras
+                }));
+            } catch (error) {
+                console.error("Error fetching custom mantras:", error);
+                return [];
+            }
+        };
+
+
+        // 6. Save Japa Round (Called by JapaMala.completeRound())
+        window.saveJapaRound = async (rounds, finalCount) => {
+            if (!isAuthReady) {
+                console.error("Auth not ready. Cannot save japa round.");
+                return { success: false, message: "Authentication not ready." };
+            }
+
+            const japaRef = collection(db, `artifacts/${appId}/users/${userId}/japa_logs`);
+            
+            try {
+                await addDoc(japaRef, {
+                    rounds: rounds,
+                    final_count: finalCount,
+                    timestamp: Timestamp.now(),
+                    date_string: new Date().toDateString() // Helper for faster local filtering/checking
+                });
+                return { success: true, message: `Completed 1 round (${finalCount} beads) and logged to cloud!` };
+            } catch (error) {
+                console.error("Error saving japa log:", error);
+                return { success: false, message: "Error saving japa log." };
+            }
+        };
+    </script>
+    <style>
+        /* Global Styles */
+        :root {
+            /* Branding Colors - Saffron is now the primary action color */
+            --primary-action-color: #f59e0b; /* Amber-500 (Saffron) for primary actions */
+            
+            /* Aesthetic Colors */
+            --text-color: #e5e7eb; /* Gray-200 for clean text */
+            --bg-color: #0d1117; /* Very dark background (Github/iOS dark mode) */
+            --card-bg: #1f2937; /* Gray-800 for card backgrounds */
+            
+            /* Unified Warm Gradient for Japa Counter & Breathing Circle */
+            --japa-gradient-start: #ffb74d;   /* Light Saffron */
+            --japa-gradient-end: #f59e0b;     /* Deep Saffron/Amber */
+            --success-color: #10b981; /* Emerald-500 */
+        }
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: flex-start; 
+            padding-bottom: 80px; 
+            user-select: none;
+            -webkit-user-select: none;
+            touch-action: manipulation;
+            overflow-x: hidden;
+        }
+
+        /* Breathing Circle Animation */
+        .breathing-circle {
+            width: 250px;
+            height: 250px;
+            background: linear-gradient(135deg, var(--japa-gradient-start), var(--japa-gradient-end));
+            border-radius: 50%;
+            opacity: 0.8;
+            box-shadow: 0 0 40px rgba(245, 158, 11, 0.7); 
+            transition: transform 4s cubic-bezier(0.4, 0, 0.6, 1); 
+            transform: scale(1); 
+            will-change: transform; 
+        }
+
+        .action-button {
+            transition: transform 0.1s ease-in-out, box-shadow 0.2s, background-color 0.2s;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1); 
+        }
+        .action-button:active {
+            transform: scale(0.98);
+        }
+
+        /* Message Box Styling */
+        #message-box {
+            position: fixed;
+            top: 1rem;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 100;
+            padding: 0.75rem 1.5rem;
+            border-radius: 9999px;
+            color: white;
+            opacity: 0;
+            transition: opacity 0.3s ease-in-out, transform 0.3s ease-in-out;
+            pointer-events: none;
+            font-weight: 600;
+        }
+        #message-box.show {
+            opacity: 1;
+            transform: translateX(-50%) translateY(0);
+        }
+
+        /* Japa Counter Styles */
+        .japa-header h2 {
+            font-size: 20px;
+            font-weight: 500;
+        }
+        
+        .japa-header p {
+            font-size: 14px;
+        }
+        
+        /* Sleek Mantra Display - Font size tailored for long mantras */
+        #current-mantra-display {
+            font-size: 1.25rem; /* xl size */
+            font-style: italic;
+            font-weight: 500;
+            color: white;
+            line-height: 1.6;
+            white-space: pre-wrap;
+            max-width: 100%;
+            padding: 0 1rem;
+        }
+
+        /* Gradient counter card */
+        .gradient-card {
+            background: linear-gradient(135deg, var(--japa-gradient-start), var(--japa-gradient-end));
+            border-radius: 24px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+            transition: transform 0.1s ease-out;
+            color: white; 
+        }
+        
+        .gradient-card:focus {
+            outline: 3px solid rgba(255, 255, 255, 0.6);
+            outline-offset: -5px;
+        }
+        
+        #japa-counter-display {
+            text-align: center;
+            font-size: 72px; 
+            font-weight: 300;
+            text-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
+        }
+        #japa-counter-display small {
+            display: block;
+            font-size: 30px;
+            margin-top: -10px;
+            opacity: 0.8;
+            font-weight: 300;
+        }
+        
+        /* Minimal buttons */
+        .japa-control-btn {
+            padding: 12px 0;
+            border-radius: 12px;
+            font-weight: 600;
+            transition: all 0.2s ease;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+        }
+
+        .mute-toggle {
+            background: rgba(42, 47, 82, 0.6);
+            border: 1px solid rgba(245, 158, 11, 0.4); 
+            border-radius: 10px;
+            color: #EEF3FB;
+            cursor: pointer;
+            backdrop-filter: blur(10px);
+            transition: all 0.3s ease;
+            width: 44px;
+            height: 44px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .mute-toggle:hover {
+            background: rgba(42, 47, 82, 0.8);
+            border-color: rgba(245, 158, 11, 0.8);
+            transform: scale(1.05);
+        }
+
+        .mute-toggle.sound-off {
+            background: rgba(42, 47, 82, 0.4);
+            border-color: rgba(168, 177, 214, 0.3);
+        }
+        
+        /* Progress Ring Styles */
+        .progress-ring {
+            width: 100px;
+            height: 100px;
+            transform: rotate(-90deg);
+        }
+        .progress-ring__circle {
+            transition: stroke-dashoffset 0.35s;
+            transform: translate(5px, 5px); 
+        }
+        
+        /* Mantra Card Style */
+        .mantra-card {
+            background-color: #1f2937;
+            border: 1px solid #374151;
+            padding: 12px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background-color 0.2s, border-color 0.2s;
+        }
+        .mantra-card:hover {
+            background-color: #374151;
+        }
+        .mantra-card.selected {
+            background-color: #453215;
+            border-color: var(--primary-action-color);
+            box-shadow: 0 0 8px rgba(245, 158, 11, 0.5);
+            color: var(--primary-action-color);
+        }
+
+        /* Segmented Control Styling */
+        #segmented-control button.active {
+            background-color: var(--primary-action-color);
+            color: white;
+        }
+        #segmented-control button:not(.active) {
+            background-color: transparent;
+            color: #9ca3af;
+        }
+
+        .sr-only {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            padding: 0;
+            margin: -1px;
+            overflow: hidden;
+            clip: rect(0, 0, 0, 0);
+            white-space: nowrap;
+            border: 0;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 antialiased">
+
+    <!-- Global Message Box -->
+    <div id="message-box" class="bg-green-600 shadow-xl"></div>
+
+    <!-- Main Content Container -->
+    <div id="app" class="w-full max-w-md mx-auto p-4 flex flex-col items-center">
+        <!-- Main Title -->
+        <h1 class="text-3xl font-bold mb-6 text-center text-white">Vedic Ville</h1>
+
+        <!-- Home View: Breathing Exercise -->
+        <div id="view-home" class="view w-full flex flex-col items-center justify-center transition-opacity duration-300">
+            
+            <!-- Technique Selector Card -->
+            <div class="mb-6 w-full bg-gray-800 p-4 rounded-xl shadow-lg border border-gray-700">
+                <label for="technique-selector" class="block text-sm font-medium text-gray-300 mb-2 uppercase tracking-wider">Breathing Technique</label>
+                <select id="technique-selector" class="w-full p-3 rounded-lg bg-gray-700 border border-gray-600 focus:ring-[--primary-action-color] focus:border-[--primary-action-color] text-white shadow-inner">
+                    <option value="Focus (4-4-4-4)">Focus (4-4-4-4)</option>
+                    <option value="Calm (4-7-8)">Calm (4-7-8)</option>
+                    <option value="Balance (4-0-4-0)">Balance (4-0-4-0)</option>
+                    <option value="Relax (3-0-3-0)">Relax (3-0-3-0)</option>
+                </select>
+            </div>
+
+            <!-- Breathing Circle Container -->
+            <div id="breathing-interface-card" class="w-full bg-gray-800 p-6 rounded-xl shadow-lg border border-gray-700 flex flex-col items-center mb-8">
+                
+                <!-- Cycle Counter -->
+                <div class="flex justify-center items-center mb-4">
+                    <p class="text-xl font-bold text-gray-300">
+                        Cycles: <span id="cycle-counter-display" class="text-[--primary-action-color] tabular-nums">0</span>
+                    </p>
+                </div>
+                
+                <div id="breathing-circle-container" class="relative flex items-center justify-center h-64 w-full mb-4">
+                    <!-- Breathing circle uses the warm saffron gradient -->
+                    <div id="breathing-circle" class="breathing-circle flex items-center justify-center">
+                        <div id="breathing-text" class="text-3xl font-semibold text-white text-center">Ready</div>
+                    </div>
+                </div>
+                <!-- Cycle duration -->
+                <p class="text-sm text-gray-400 mt-2">Cycle Time: <span id="cycle-duration" class="font-medium text-gray-300">16s</span></p>
+            </div>
+            
+            <button id="toggle-breathing" class="action-button w-full py-3 px-6 bg-[--primary-action-color] text-white font-semibold rounded-xl hover:bg-amber-400 focus:outline-none focus:ring-4 focus:ring-amber-500 focus:ring-opacity-50">
+                Start
+            </button>
+            <p class="text-xs text-gray-500 mt-2">Press Space or Enter to start</p>
+        </div>
+
+        <!-- Japa Counter View -->
+        <div id="view-japa" class="view w-full hidden flex-col items-center transition-opacity duration-300">
+            
+            <!-- Daily Goal Tracker Card -->
+            <div class="w-full bg-gray-800 p-4 rounded-xl shadow-lg border border-gray-700 mb-6 flex justify-between items-center">
+                <div class="flex items-center space-x-4">
+                    <!-- Goal Progress Ring -->
+                    <div class="relative flex-shrink-0">
+                        <svg class="progress-ring" width="50" height="50" viewBox="0 0 50 50">
+                            <circle class="progress-ring__circle" stroke="#42506e" stroke-width="4" fill="transparent" r="23" cx="25" cy="25" />
+                            <circle id="goal-progress-circle" class="progress-ring__circle" stroke="var(--primary-action-color)" stroke-width="4" fill="transparent" r="23" cx="25" cy="25" stroke-dasharray="144.5" stroke-dashoffset="144.5" />
+                        </svg>
+                        <span id="goal-percentage" class="absolute inset-0 flex items-center justify-center text-sm font-bold text-gray-200">0%</span>
+                    </div>
+
+                    <!-- Goal Text and Status -->
+                    <div class="flex flex-col">
+                        <p class="text-sm font-medium text-gray-400 uppercase tracking-wider">Daily Goal</p>
+                        <p class="text-xl font-bold text-white">
+                            <span id="currentDailyRounds">0</span> / <span id="dailyRoundGoal">4</span> Rounds
+                        </p>
+                        <p id="goal-status-message" class="text-xs font-semibold mt-1 text-gray-400 transition-colors duration-300">Ready to start.</p>
+                    </div>
+                </div>
+
+                <!-- Goal Settings Button -->
+                <button id="settingsBtn" class="bg-gray-700 text-gray-400 p-2 rounded-lg hover:bg-gray-600 transition-colors">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.562.342 1.13.23 1.724-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+                </button>
+            </div>
+
+            <!-- Japa Mantra Header -->
+            <div class="japa-header mb-6 text-center w-full max-w-sm">
+                <div class="flex items-center justify-center space-x-2 mb-2">
+                    <h2 id="current-mantra-title" class="text-xl font-medium text-gray-400">Chanting</h2>
+                    <button id="edit-mantra-btn" class="text-gray-500 hover:text-[--primary-action-color] transition-colors p-1 rounded-full" aria-label="Edit mantra">
+                        <!-- Pencil Icon -->
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"></path></svg>
+                    </button>
+                </div>
+                <!-- Mantra Display -->
+                <p id="current-mantra-display" class="text-2xl font-semibold italic text-white leading-relaxed whitespace-pre-wrap">Loading...</p>
+                <p class="text-sm text-gray-500 mt-1">Tap the card or press Space/Enter</p>
+            </div>
+            
+            <!-- Gradient Counter Card -->
+            <div id="japa-card-counter" class="gradient-card w-full max-w-sm aspect-square flex items-center justify-center my-8 cursor-pointer active:scale-[0.98] transition-transform duration-100 shadow-xl" 
+                tabindex="0" role="button" aria-label="Japa counter. Tap to count bead.">
+                <div id="japa-counter-display">
+                    <div class="text-7xl font-light" id="count">0</div>
+                    <small class="text-3xl font-light opacity-80">/ 108</small>
+                </div>
+            </div>
+
+            <!-- Japa Controls and Stats -->
+            <div class="w-full max-w-sm space-y-4">
+                
+                <!-- Lifetime Rounds -->
+                <div class="flex justify-between items-center p-3 bg-gray-800 rounded-xl border border-gray-700">
+                    <span class="text-sm font-medium text-gray-400">Lifetime Rounds</span>
+                    <div class="flex items-center space-x-4">
+                        <span class="text-xl font-semibold text-amber-300 tabular-nums" id="totalLoggedRounds">0</span>
+                        <button class="mute-toggle" id="muteToggle" aria-pressed="false" aria-label="Toggle sound">
+                            <span id="muteIcon" class="text-xl">🔔</span>
+                        </button>
+                    </div>
+                </div>
+                
+                <!-- Controls -->
+                <div class="flex justify-between items-center space-x-3">
+                    <button class="japa-control-btn flex-1 bg-gray-700 text-gray-200 border border-gray-600 hover:bg-gray-600" id="undoBtn">
+                        ↩︎ Undo
+                    </button>
+                    <button class="japa-control-btn flex-1 bg-red-700/50 text-white border border-red-700/80 hover:bg-red-700/70" id="resetBtn">
+                        ⟲ Reset
+                    </button>
+                    <button class="japa-control-btn flex-1 bg-[--primary-action-color] text-white font-semibold border-[--primary-action-color] hover:bg-amber-400" id="completeBtn">
+                        ✅ Complete
+                    </button>
+                </div>
+            </div>
+            <div class="sr-only" id="announcer" aria-live="assertive"></div>
+        </div>
+
+
+        <!-- Mantra List View -->
+        <div id="view-mantras" class="view w-full hidden flex-col items-center transition-opacity duration-300">
+            <h2 class="text-2xl font-semibold mb-6 text-white w-full text-center">Powerful Vedic Mantras</h2>
+
+            <p class="text-sm text-gray-400 mb-6 text-center">Explore these fundamental mantras from the Vaishnava and Shaiva traditions to deepen your practice.</p>
+
+            <div class="w-full space-y-4">
+                <!-- Static Mantra Cards -->
+                <div class="bg-gray-800 p-5 rounded-xl shadow-lg border-l-4 border-[--primary-action-color] border-gray-700">
+                    <h3 class="text-xl font-bold text-amber-300 mb-2">Hare Krishna Maha-Mantra</h3>
+                    <p class="text-sm italic text-gray-300 mb-3">Hare Krishna, Hare Krishna, Krishna Krishna, Hare Hare. Hare Rama, Hare Rama, Rama Rama, Hare Hare.</p>
+                    <hr class="border-gray-700 my-3">
+                    <p class="text-sm font-semibold text-gray-400">Tradition: <span class="text-[--primary-action-color]">Vaishnava (Vishnu/Krishna)</span></p>
+                    <p class="text-sm text-gray-300 mt-2">Significance: This "Great Mantra" is considered the most effective means of self-realization in the current age, awakening pure consciousness and love for the Supreme Being.</p>
+                </div>
+                <!-- ... other mantras ... -->
+                 <div class="bg-gray-800 p-5 rounded-xl shadow-lg border-l-4 border-[--primary-action-color] border-gray-700">
+                    <h3 class="text-xl font-bold text-amber-300 mb-2">Om Namo Bhagavate Vasudevaya</h3>
+                    <p class="text-sm italic text-gray-300 mb-3">I bow to the Lord Vasudeva (Krishna, the son of Vasudeva).</p>
+                    <hr class="border-gray-700 my-3">
+                    <p class="text-sm font-semibold text-gray-400">Tradition: <span class="text-[--primary-action-color]">Vaishnava (Vishnu/Krishna)</span></p>
+                    <p class="text-sm text-gray-300 mt-2">Significance: A powerful mantra of surrender and liberation, known as the Dwadashakshari Mantra (twelve-syllable mantra). It grants peace and freedom from the cycle of birth and death.</p>
+                </div>
+                 <div class="bg-gray-800 p-5 rounded-xl shadow-lg border-l-4 border-violet-500 border-gray-700">
+                    <h3 class="text-xl font-bold text-violet-300 mb-2">Om Namah Shivaya</h3>
+                    <p class="text-sm italic text-gray-300 mb-3">I bow to Shiva.</p>
+                    <hr class="border-gray-700 my-3">
+                    <p class="text-sm font-semibold text-gray-400">Tradition: <span class="text-violet-500">Shaiva (Shiva)</span></p>
+                    <p class="text-sm text-gray-300 mt-2">Significance: The Panchakshara (five-syllable) mantra. It cleanses impurities, invokes inner peace, and brings one closer to the ultimate reality embodied by Lord Shiva.</p>
+                </div>
+                 <div class="bg-gray-800 p-5 rounded-xl shadow-lg border-l-4 border-violet-500 border-gray-700">
+                    <h3 class="text-xl font-bold text-violet-300 mb-2">Maha Mrityunjaya Mantra</h3>
+                    <p class="text-sm italic text-gray-300 mb-3">Om Tryambakam Yajamahe Sugandhim Pushti Vardhanam Urvarukamiva Bandhanan Mrityor Mukshiya Maamritat.</p>
+                    <hr class="border-gray-700 my-3">
+                    <p class="text-sm font-semibold text-gray-400">Tradition: <span class="text-violet-500">Shaiva (Shiva)</span></p>
+                    <p class="text-sm text-gray-300 mt-2">Significance: The Great Death-Conquering Mantra. It is chanted for longevity, health, protection, spiritual nourishment, and moksha (liberation).</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Goal Setting Modal -->
+        <div id="goalModal" class="fixed inset-0 bg-black bg-opacity-70 z-20 hidden items-center justify-center p-4">
+            <div class="bg-gray-800 p-6 rounded-xl shadow-2xl w-full max-w-xs border border-gray-700">
+                <h3 class="text-xl font-bold mb-4 text-white">Set Daily Goal</h3>
+                <p class="text-sm text-gray-400 mb-4">How many full Japa rounds (108 beads) do you aim to complete today?</p>
+                <label for="newGoalInput" class="block text-sm font-medium text-gray-300 mb-2">Rounds per Day</label>
+                <input type="number" id="newGoalInput" min="1" max="108" value="4" class="w-full p-3 rounded-lg bg-gray-700 border border-gray-600 focus:ring-[--primary-action-color] focus:border-[--primary-action-color] text-white shadow-inner mb-6">
+                <div class="flex justify-end space-x-3">
+                    <button id="cancelGoalBtn" class="py-2 px-4 text-sm font-semibold rounded-lg text-gray-400 hover:text-white hover:bg-gray-700 transition-colors">Cancel</button>
+                    <button id="saveGoalBtn" class="py-2 px-4 text-sm font-semibold rounded-lg bg-[--primary-action-color] text-white hover:bg-amber-400 transition-colors">Save Goal</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Mantra Selection Modal -->
+        <div id="mantraSelectorModal" class="fixed inset-0 bg-black bg-opacity-70 z-20 hidden items-center justify-center p-4">
+            <div class="bg-gray-800 p-6 rounded-xl shadow-2xl w-full max-w-sm border border-gray-700">
+                <h3 class="text-xl font-bold mb-4 text-white">Select Your Mantra</h3>
+                <!-- Segmented Control -->
+                <div id="segmented-control" class="flex p-1 bg-gray-700 rounded-lg mb-4">
+                    <button data-tab="preset" class="flex-1 py-2 text-sm font-medium rounded-md text-white bg-[--primary-action-color] shadow-md transition-colors active">Preset/Custom List</button>
+                    <button data-tab="custom" class="flex-1 py-2 text-sm font-medium rounded-md text-gray-400 hover:text-gray-200 transition-colors">Enter Custom</button>
+                </div>
+                <!-- Tab 1: List -->
+                <div id="tab-preset" class="space-y-3 max-h-60 overflow-y-auto pr-2">
+                    <p class="text-center text-gray-500">Loading mantras...</p>
+                </div>
+                <!-- Tab 2: Input -->
+                <div id="tab-custom" class="hidden">
+                    <label for="customMantraInput" class="block text-sm font-medium text-gray-300 mb-2">Enter your custom mantra or prayer (max 3 lines):</label>
+                    <textarea id="customMantraInput" rows="3" placeholder="Example: Om Namah Shivaya" class="w-full p-3 rounded-lg bg-gray-700 border border-gray-600 focus:ring-[--primary-action-color] focus:border-[--primary-action-color] text-white shadow-inner resize-none"></textarea>
+                    <div class="flex justify-end mt-4">
+                        <button id="saveCustomMantraBtn" class="py-2 px-4 text-sm font-semibold rounded-lg bg-[--primary-action-color] text-white hover:bg-amber-400 transition-colors">Save & Use</button>
+                    </div>
+                </div>
+                <div class="flex justify-end space-x-3 mt-6">
+                    <button id="closeMantraModalBtn" class="py-2 px-4 text-sm font-semibold rounded-lg text-gray-400 hover:text-white hover:bg-gray-700 transition-colors">Close</button>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- Bottom Navigation -->
+    <nav class="fixed bottom-0 left-0 right-0 bg-gray-800 border-t border-gray-700 shadow-2xl z-10">
+        <div class="max-w-md mx-auto flex justify-around">
+            <button data-view="home" class="nav-button flex-1 py-3 text-center transition duration-150 border-t-2 border-[--primary-action-color] text-[--primary-action-color]">
+                <svg class="w-6 h-6 mx-auto mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10M10 5v14M16 4v16M20 8v8"></path></svg>
+                <span class="text-xs">Breathing</span>
+            </button>
+            <button data-view="japa" class="nav-button flex-1 py-3 text-center transition duration-150 border-t-2 border-transparent text-gray-400 hover:text-gray-300">
+                <svg class="w-6 h-6 mx-auto mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 0a9 9 0 019-9m-9 9l3 3m-3-3l-3 3"></path></svg>
+                <span class="text-xs">Japa</span>
+            </button>
+            <button data-view="mantras" class="nav-button flex-1 py-3 text-center transition duration-150 border-t-2 border-transparent text-gray-400 hover:text-gray-300">
+                <svg class="w-6 h-6 mx-auto mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M4.757 5.343l-.707.707M12 20.914l-.707-.707M18.364 18.364l-.707-.707M11 20h2c1.786 0 2.78-1.43 2.5-3.5L14.4 12c-.22-.7-.71-1.1-1.4-1.1h-2c-.69 0-1.18.4-1.4 1.1l-1.1 4.5c-.28 2.07.71 3.5 2.5 3.5z"></path></svg>
+                <span class="text-xs">Mantras</span>
+            </button>
+        </div>
+    </nav>
+
+    <script>
+        // --- Global Utility Functions ---
+        function showMessage(message, isSuccess = true) {
+            const box = document.getElementById('message-box');
+            box.textContent = message;
+            box.className = isSuccess ? 'bg-green-600 shadow-xl' : 'bg-red-600 shadow-xl'; 
+            box.classList.add('show');
+            setTimeout(() => {
+                box.classList.remove('show');
+            }, 3000);
+        }
+
+        // --- View Management ---
+        let currentView = 'home';
+
+        function switchView(viewName) {
+            if (currentView === 'home' && isBreathing) {
+                stopBreathing();
+            }
+
+            const views = document.querySelectorAll('.view');
+            views.forEach(view => {
+                view.classList.add('hidden');
+                view.style.display = 'none'; 
+            });
+            
+            const targetView = document.getElementById(`view-${viewName}`);
+            if (targetView) {
+                targetView.classList.remove('hidden');
+                targetView.style.display = 'flex'; 
+                currentView = viewName;
+            }
+
+            const navButtons = document.querySelectorAll('.nav-button');
+            navButtons.forEach(button => {
+                const isActive = button.dataset.view === viewName;
+                button.classList.toggle('border-[--primary-action-color]', isActive);
+                button.classList.toggle('text-[--primary-action-color]', isActive);
+                button.classList.toggle('border-transparent', !isActive);
+                button.classList.toggle('text-gray-400', !isActive);
+                button.classList.toggle('hover:text-gray-300', !isActive);
+            });
+        }
+
+        document.querySelectorAll('.nav-button').forEach(button => {
+            button.addEventListener('click', (e) => {
+                switchView(e.currentTarget.dataset.view);
+            });
+        });
+
+        // --- Breathing Logic ---
+        const breathingCircle = document.getElementById('breathing-circle');
+        const breathingText = document.getElementById('breathing-text');
+        const toggleBreathingButton = document.getElementById('toggle-breathing');
+        const techniqueSelector = document.getElementById('technique-selector');
+        const cycleDurationDisplay = document.getElementById('cycle-duration');
+        const cycleCounterDisplay = document.getElementById('cycle-counter-display');
+
+        let isBreathing = false;
+        let animationTimeout; 
+        let currentCycle = [];
+        let cyclesCompleted = 0;
+
+        const breathingTechniques = {
+            'Focus (4-4-4-4)': [
+                { text: 'Inhale', duration: 4000, scale: 1.2, transitionDuration: '4s' }, 
+                { text: 'Hold', duration: 4000, scale: 1.2, transitionDuration: '0s' }, 
+                { text: 'Exhale', duration: 4000, scale: 1, transitionDuration: '4s' },  
+                { text: 'Hold', duration: 4000, scale: 1, transitionDuration: '0s' },  
+            ],
+            'Calm (4-7-8)': [
+                { text: 'Inhale', duration: 4000, scale: 1.2, transitionDuration: '4s' }, 
+                { text: 'Hold', duration: 7000, scale: 1.2, transitionDuration: '0s' }, 
+                { text: 'Exhale', duration: 8000, scale: 1, transitionDuration: '8s' },  
+                { text: 'Hold', duration: 1000, scale: 1, transitionDuration: '0s' },  
+            ],
+            'Balance (4-0-4-0)': [
+                { text: 'Inhale', duration: 4000, scale: 1.2, transitionDuration: '4s' }, 
+                { text: 'Hold', duration: 10, scale: 1.2, transitionDuration: '0s' }, 
+                { text: 'Exhale', duration: 4000, scale: 1, transitionDuration: '4s' },  
+                { text: 'Hold', duration: 10, scale: 1, transitionDuration: '0s' }, 
+            ],
+            'Relax (3-0-3-0)': [
+                { text: 'Inhale', duration: 3000, scale: 1.2, transitionDuration: '3s' }, 
+                { text: 'Hold', duration: 10, scale: 1.2, transitionDuration: '0s' }, 
+                { text: 'Exhale', duration: 3000, scale: 1, transitionDuration: '3s' },  
+                { text: 'Hold', duration: 10, scale: 1, transitionDuration: '0s' }, 
+            ]
+        };
+        
+        function updateCycleCounterUI() {
+            if (cycleCounterDisplay) {
+                cycleCounterDisplay.textContent = cyclesCompleted;
+            }
+        }
+
+        function updateTechnique() {
+            const selectedName = techniqueSelector.value;
+            currentCycle = breathingTechniques[selectedName];
+            
+            const totalDuration = currentCycle.reduce((sum, step) => sum + step.duration, 0) / 1000;
+            cycleDurationDisplay.textContent = `${totalDuration}s`;
+            
+            cyclesCompleted = 0;
+            updateCycleCounterUI();
+            
+            if (isBreathing) {
+                stopBreathing();
+                startBreathing(); 
+            } else {
+                breathingText.textContent = 'Ready';
+            }
+        }
+
+        function performStep(step, cycleIndex) {
+            if (!isBreathing) return; 
+
+            breathingCircle.style.transitionDuration = step.transitionDuration;
+            breathingCircle.style.transform = `scale(${step.scale})`;
+            breathingText.textContent = step.text;
+            
+            animationTimeout = setTimeout(() => {
+                const nextIndex = (cycleIndex + 1) % currentCycle.length;
+                if (nextIndex === 0) {
+                    cyclesCompleted++;
+                    updateCycleCounterUI();
+                }
+                performStep(currentCycle[nextIndex], nextIndex);
+            }, step.duration);
+        }
+
+        function startBreathing() {
+            if (isBreathing) return;
+            isBreathing = true;
+            toggleBreathingButton.textContent = 'Stop';
+            cyclesCompleted = 0;
+            updateCycleCounterUI();
+            performStep(currentCycle[0], 0);
+        }
+
+        function stopBreathing() {
+            if (!isBreathing) return;
+            isBreathing = false;
+            clearTimeout(animationTimeout);
+            toggleBreathingButton.textContent = 'Start';
+            breathingCircle.style.transform = 'scale(1)'; 
+            breathingCircle.style.transitionDuration = '1s';
+            breathingText.textContent = 'Ready'; 
+        }
+
+        techniqueSelector.addEventListener('change', updateTechnique);
+        toggleBreathingButton.addEventListener('click', () => {
+            if (isBreathing) {
+                stopBreathing();
+            } else {
+                startBreathing();
+            }
+        });
+        
+        // --- Japa Mala Class ---
+        class JapaMala {
+            constructor(totalDataCallback) {
+                this.count = 0;
+                this.rounds = 0;
+                this.soundOn = true;
+                this.audioContext = null;
+                this.totalDataCallback = totalDataCallback;
+                
+                this.loadState();
+                this.initAudio();
+                this.bindEvents();
+                this.updateUI();
+                this.toggleMuteIcon();
+            }
+
+            loadState() {
+                try {
+                    if (typeof(Storage) === "undefined" || !window.localStorage) return;
+                    const saved = window.localStorage.getItem('japa_mala_state_v2'); 
+                    if (saved) {
+                        const state = JSON.parse(saved);
+                        this.count = Math.max(0, Math.min(108, state.count || 0));
+                        this.soundOn = state.soundOn !== false;
+                    }
+                } catch (e) { console.error(e); }
+            }
+
+            saveState() {
+                try {
+                    if (typeof(Storage) === "undefined" || !window.localStorage) return;
+                    window.localStorage.setItem('japa_mala_state_v2', JSON.stringify({
+                        count: this.count,
+                        soundOn: this.soundOn
+                    }));
+                } catch (e) { console.error(e); }
+            }
+
+            async initAudio() {
+                document.addEventListener('click', this.initAudioContext.bind(this), { once: true });
+                document.addEventListener('touchstart', this.initAudioContext.bind(this), { once: true });
+            }
+
+            async initAudioContext() {
+                if (this.audioContext) return;
+                try {
+                    this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                    if (this.audioContext.state === 'suspended') await this.audioContext.resume();
+                } catch (e) { console.error(e); }
+            }
+
+            playTone(frequency, duration, type = 'sine', volume = 0.5) {
+                if (!this.soundOn || !this.audioContext) return;
+                const oscillator = this.audioContext.createOscillator();
+                const gainNode = this.audioContext.createGain();
+                oscillator.type = type;
+                oscillator.frequency.setValueAtTime(frequency, this.audioContext.currentTime);
+                gainNode.gain.setValueAtTime(volume, this.audioContext.currentTime);
+                gainNode.gain.exponentialRampToValueAtTime(0.001, this.audioContext.currentTime + duration);
+                oscillator.connect(gainNode);
+                gainNode.connect(this.audioContext.destination);
+                oscillator.start();
+                oscillator.stop(this.audioContext.currentTime + duration);
+            }
+
+            playTapSound() { this.playTone(350 + this.count * 2, 0.05, 'square', 0.2); }
+            playBellSound() { this.playTone(880, 0.5, 'sine', 0.7); this.playTone(1320, 0.5, 'sine', 0.4); }
+
+            hapticFeedback(type) {
+                if (navigator.vibrate) {
+                    if (type === 'tap') navigator.vibrate(50);
+                    else if (type === 'complete') navigator.vibrate([100, 50, 200]);
+                }
+            }
+
+            bindEvents() {
+                const japaCard = document.getElementById('japa-card-counter');
+                japaCard.addEventListener('click', () => this.tapBead());
+                japaCard.addEventListener('keydown', (e) => {
+                    if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); this.tapBead(); }
+                });
+                document.getElementById('undoBtn').addEventListener('click', () => this.undoBead());
+                document.getElementById('resetBtn').addEventListener('click', () => this.resetCount());
+                document.getElementById('completeBtn').addEventListener('click', () => this.completeRound());
+                document.getElementById('muteToggle').addEventListener('click', () => this.toggleMute());
+            }
+
+            updateUI() { document.getElementById('count').textContent = `${this.count}`; }
+
+            tapBead() {
+                if (this.count >= 108) { this.completeRound(true); return; }
+                this.count++;
+                this.playTapSound();
+                this.hapticFeedback('tap');
+                if (this.count === 108) {
+                    this.playBellSound();
+                    this.hapticFeedback('complete');
+                    document.getElementById('japa-card-counter').classList.add('ring-breathe');
+                    setTimeout(() => document.getElementById('japa-card-counter').classList.remove('ring-breathe'), 1000);
+                }
+                this.updateUI();
+                this.saveState();
+            }
+
+            undoBead() {
+                if (this.count <= 0) return;
+                this.count--;
+                this.hapticFeedback('tap');
+                this.updateUI();
+                this.saveState();
+            }
+
+            resetCount() {
+                if (this.count === 0) return;
+                this.count = 0;
+                this.updateUI();
+                this.saveState();
+                showMessage('Japa session reset. Start a new round!', false);
+            }
+
+            async completeRound(logToCloud = true) {
+                if (this.count === 0) { showMessage('The counter is zero. Please count beads first.', false); return; }
+                if (this.count < 108) { this.playBellSound(); this.hapticFeedback('complete'); }
+                this.rounds++;
+                if (logToCloud && window.saveJapaRound) {
+                    const result = await window.saveJapaRound(1, this.count);
+                    showMessage(result.message, result.success);
+                }
+                this.count = 0;
+                this.updateUI();
+                this.saveState();
+            }
+
+            toggleMute() {
+                this.soundOn = !this.soundOn;
+                this.toggleMuteIcon();
+                this.saveState();
+            }
+
+            toggleMuteIcon() {
+                const icon = document.getElementById('muteIcon');
+                const button = document.getElementById('muteToggle');
+                if (this.soundOn) {
+                    icon.textContent = '🔔';
+                    button.classList.remove('sound-off');
+                    button.setAttribute('aria-pressed', 'false');
+                } else {
+                    icon.textContent = '🔕';
+                    button.classList.add('sound-off');
+                    button.setAttribute('aria-pressed', 'true');
+                }
+            }
+        }
+        
+        let japaMalaInstance = null;
+
+        // --- Goal Tracker UI Logic ---
+        const dailyGoalDisplay = document.getElementById('dailyRoundGoal');
+        const currentRoundsDisplay = document.getElementById('currentDailyRounds');
+        const totalLoggedRoundsDisplay = document.getElementById('totalLoggedRounds');
+        const goalProgressCircle = document.getElementById('goal-progress-circle');
+        const goalPercentageDisplay = document.getElementById('goal-percentage');
+        const goalStatusMessage = document.getElementById('goal-status-message');
+        const circleRadius = 23; 
+        const circleCircumference = 2 * Math.PI * circleRadius;
+        
+        goalProgressCircle.style.strokeDasharray = circleCircumference;
+        
+        function updateGoalProgressUI(dailyRounds, dailyGoal) {
+            const percentage = Math.min(100, (dailyRounds / dailyGoal) * 100);
+            const offset = circleCircumference - (percentage / 100) * circleCircumference;
+            goalProgressCircle.style.strokeDashoffset = offset;
+            goalPercentageDisplay.textContent = `${Math.floor(percentage)}%`;
+            currentRoundsDisplay.textContent = dailyRounds;
+            dailyGoalDisplay.textContent = dailyGoal;
+
+            if (percentage >= 100) {
+                goalStatusMessage.textContent = 'Goal Achieved! ✨';
+                goalStatusMessage.classList.add('text-[--success-color]');
+                goalStatusMessage.classList.remove('text-gray-400', 'text-amber-300');
+            } else if (percentage > 50) {
+                goalStatusMessage.textContent = 'Halfway there! Keep going.';
+                goalStatusMessage.classList.remove('text-[--success-color]', 'text-gray-400');
+                goalStatusMessage.classList.add('text-amber-300');
+            } else {
+                goalStatusMessage.textContent = 'Ready to start.';
+                goalStatusMessage.classList.add('text-gray-400');
+                goalStatusMessage.classList.remove('text-[--success-color]', 'text-amber-300');
+            }
+        }
+
+        function renderJapaData({ dailyRounds, lifetimeRounds }) {
+            updateGoalProgressUI(dailyRounds, window.dailyRoundGoal);
+            totalLoggedRoundsDisplay.textContent = lifetimeRounds;
+        }
+
+        function renderDailyGoal(newGoal) {
+            window.dailyRoundGoal = newGoal;
+            updateGoalProgressUI(Number(currentRoundsDisplay.textContent), newGoal);
+            document.getElementById('newGoalInput').value = newGoal; 
+        }
+
+        function renderCurrentMantra(newMantra) {
+            window.currentMantra = newMantra;
+            document.getElementById('current-mantra-display').textContent = newMantra;
+            document.getElementById('customMantraInput').value = newMantra;
+        }
+
+        // --- Goal Setting Modal Logic ---
+        const goalModal = document.getElementById('goalModal');
+        const settingsBtn = document.getElementById('settingsBtn');
+        const cancelGoalBtn = document.getElementById('cancelGoalBtn');
+        const saveGoalBtn = document.getElementById('saveGoalBtn');
+        const newGoalInput = document.getElementById('newGoalInput');
+
+        settingsBtn.addEventListener('click', () => {
+            newGoalInput.value = window.dailyRoundGoal; 
+            goalModal.style.display = 'flex';
+        });
+
+        cancelGoalBtn.addEventListener('click', () => { goalModal.style.display = 'none'; });
+
+        saveGoalBtn.addEventListener('click', () => {
+            const newGoal = parseInt(newGoalInput.value);
+            if (newGoal > 0) {
+                window.setDailyGoal(newGoal);
+                goalModal.style.display = 'none';
+            } else { showMessage('Goal must be a number greater than 0.', false); }
+        });
+        
+        // --- Mantra Selection Modal Logic ---
+        const mantraSelectorModal = document.getElementById('mantraSelectorModal');
+        const editMantraBtn = document.getElementById('edit-mantra-btn');
+        const closeMantraModalBtn = document.getElementById('closeMantraModalBtn');
+        const presetMantraTab = document.getElementById('tab-preset');
+        const customMantraTab = document.getElementById('tab-custom');
+        const segmentedControl = document.getElementById('segmented-control');
+        const saveCustomMantraBtn = document.getElementById('saveCustomMantraBtn');
+        const customMantraTextarea = document.getElementById('customMantraInput');
+
+        const presetMantras = [
+            { name: "Hare Krishna Maha-Mantra", text: "Hare Krishna, Hare Krishna, Krishna Krishna, Hare Hare. Hare Rama, Hare Rama, Rama Rama, Hare Hare.", border: 'border-[--primary-action-color]', is_custom: false },
+            { name: "Om Namo Bhagavate Vasudevaya", text: "Om Namo Bhagavate Vasudevaya", border: 'border-[--primary-action-color]', is_custom: false },
+            { name: "Om Namah Shivaya", text: "Om Namah Shivaya", border: 'border-violet-500', is_custom: false },
+            { name: "Maha Mrityunjaya Mantra", text: "Om Tryambakam Yajamahe Sugandhim Pushti Vardhanam Urvarukamiva Bandhanan Mrityor Mukshiya Maamritat.", border: 'border-violet-500', is_custom: false },
+            { name: "Gayatri Mantra", text: "Om Bhur Bhuvah Svah, Tat Savitur Varenyam, Bhargo Devasya Dheemahi, Dhiyo Yo Nah Prachodayat.", border: 'border-blue-500', is_custom: false },
+        ];
+
+        function selectMantra(mantraText) {
+            window.setMantra(mantraText);
+            mantraSelectorModal.style.display = 'none';
+        }
+
+        async function renderPresetMantras() { 
+            presetMantraTab.innerHTML = '<p class="text-center text-gray-500">Loading mantras...</p>';
+            const customMantras = await window.getCustomMantras();
+            const presetTexts = new Set(presetMantras.map(m => m.text.trim()));
+            const filteredCustomMantras = customMantras.filter(m => !presetTexts.has(m.text.trim()));
+            const allMantras = [...presetMantras, ...filteredCustomMantras];
+            
+            presetMantraTab.innerHTML = ''; 
+            if (allMantras.length === 0) {
+                 presetMantraTab.innerHTML = '<p class="text-center text-gray-500">No mantras available. Add a custom one!</p>';
+                 return;
+            }
+
+            allMantras.forEach(m => {
+                const isSelected = m.text.trim() === window.currentMantra.trim();
+                const name = m.is_custom ? 'Custom Mantra' : m.name;
+                const border = m.is_custom ? 'border-purple-500' : m.border;
+                const textColor = isSelected ? 'text-[--primary-action-color]' : (m.is_custom ? 'text-purple-300' : 'text-amber-300');
+                
+                const card = document.createElement('div');
+                card.className = `mantra-card ${isSelected ? 'selected' : ''} border-l-4 ${border}`;
+                card.innerHTML = `
+                    <h4 class="text-sm font-bold ${textColor} mb-1">${name}</h4>
+                    <p class="text-xs italic ${isSelected ? 'text-[--primary-action-color]' : 'text-gray-300'} whitespace-pre-wrap">${m.text}</p>
+                `;
+                card.onclick = () => selectMantra(m.text);
+                presetMantraTab.appendChild(card);
+            });
+        }
+
+        function switchMantraTab(tabName) {
+            const presetBtn = segmentedControl.querySelector('[data-tab="preset"]');
+            const customBtn = segmentedControl.querySelector('[data-tab="custom"]');
+
+            if (tabName === 'preset') {
+                presetMantraTab.classList.remove('hidden');
+                customMantraTab.classList.add('hidden');
+                presetBtn.classList.add('active', 'bg-[--primary-action-color]', 'text-white');
+                presetBtn.classList.remove('text-gray-400');
+                customBtn.classList.remove('active', 'bg-[--primary-action-color]', 'text-white');
+                customBtn.classList.add('text-gray-400');
+                renderPresetMantras();
+            } else {
+                presetMantraTab.classList.add('hidden');
+                customMantraTab.classList.remove('hidden');
+                customMantraTextarea.value = window.currentMantra; 
+                customBtn.classList.add('active', 'bg-[--primary-action-color]', 'text-white');
+                customBtn.classList.remove('text-gray-400');
+                presetBtn.classList.remove('active', 'bg-[--primary-action-color]', 'text-white');
+                presetBtn.classList.add('text-gray-400');
+            }
+        }
+
+        editMantraBtn.addEventListener('click', () => {
+            switchMantraTab('preset'); 
+            mantraSelectorModal.style.display = 'flex';
+        });
+
+        closeMantraModalBtn.addEventListener('click', () => { mantraSelectorModal.style.display = 'none'; });
+
+        segmentedControl.querySelectorAll('button').forEach(btn => {
+            btn.addEventListener('click', (e) => { switchMantraTab(e.target.dataset.tab); });
+        });
+
+        saveCustomMantraBtn.addEventListener('click', async () => {
+            const customText = customMantraTextarea.value.trim();
+            if (customText.length > 0) {
+                selectMantra(customText); 
+                await window.saveCustomMantraToList(customText);
+            } else { showMessage('Custom mantra cannot be empty.', false); }
+        });
+
+        // --- App Startup ---
+        window.startApp = (currentUserId) => {
+            updateTechnique(); 
+            switchView('home');
+            if (typeof window.setupJapaListener === 'function') {
+                window.setupJapaListener(renderJapaData);
+                window.setupSettingsListener(renderDailyGoal, renderCurrentMantra); 
+            }
+            japaMalaInstance = new JapaMala(renderJapaData);
+
+            document.addEventListener('keydown', (e) => {
+                if (e.target.tagName.toLowerCase() === 'button' || e.target.tagName.toLowerCase() === 'select' || e.target.tagName.toLowerCase() === 'textarea' || e.target.tagName.toLowerCase() === 'input') return;
+                switch (e.key) {
+                    case ' ':
+                    case 'Enter':
+                        e.preventDefault();
+                        if (currentView === 'japa') japaMalaInstance.tapBead();
+                        else if (currentView === 'home') toggleBreathingButton.click();
+                        break;
+                    case 'Backspace':
+                        e.preventDefault();
+                        if (currentView === 'japa') japaMalaInstance.undoBead();
+                        break;
+                    case 'r':
+                        if ((e.ctrlKey || e.metaKey) && currentView === 'japa') {
+                            e.preventDefault();
+                            japaMalaInstance.resetCount();
+                        }
+                        break;
+                }
+            });
+        };
+
+        // Fallback
+        if (typeof window.startApp === 'undefined') {
+             window.startApp = (id) => {
+                updateTechnique();
+                switchView('home');
+                japaMalaInstance = new JapaMala(() => {});
+            };
+        }
+    </script>
+</body>
+</html>
